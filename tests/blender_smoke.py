@@ -55,6 +55,10 @@ try:
     menu_class = bpy.types.MACHIN3_MT_modes_pie
     original = menu_class.add_contextual_group_button
     original_draw_empty = menu_class.draw_empty
+    original_close_slot_methods = {
+        method_name: getattr(menu_class, method_name)
+        for method_name in integration.M3_CLOSE_SLOT_METHODS
+    }
     pies_module = sys.modules[menu_class.__module__]
 
     for operator_class in operator_classes:
@@ -74,6 +78,23 @@ try:
         integration.DRAW_EMPTY_PATCH_MARKER,
         False,
     )
+    for method_name in integration.M3_CLOSE_SLOT_METHODS:
+        assert getattr(
+            getattr(menu_class, method_name),
+            integration.CLOSE_SLOT_PATCH_MARKER,
+            False,
+        )
+
+    untouched_stack = []
+    menu_class.add_contextual_group_button(
+        SimpleNamespace(
+            show_select_group_up=False,
+            show_select_group=False,
+            show_create_group=False,
+        ),
+        untouched_stack,
+    )
+    assert [button["operator"] for button in untouched_stack] == [CREATE]
 
     ordinary = SimpleNamespace(name="Cube", type="MESH", is_group=False)
     group = SimpleNamespace(
@@ -121,6 +142,37 @@ try:
     assert integration._button_text(ADD).endswith("  Ⓖ")
     assert integration._button_text(REMOVE).endswith("  Ⓖ")
     assert integration._button_text(CLOSE).endswith("  Ⓖ")
+    close_replacements = integration._close_slot_replacements(ordinary)
+    assert close_replacements[7]["operator"] == CLOSE
+    assert close_replacements[7]["text"].endswith("  Ⓖ")
+
+    class RecordingPie:
+        def __init__(self):
+            self.events = []
+
+        def separator(self):
+            self.events.append(("separator",))
+
+        def operator(self, idname, **kwargs):
+            self.events.append(("operator", idname, kwargs))
+            return SimpleNamespace()
+
+    routed_pie = RecordingPie()
+
+    def draw_eight_empty_slots(_self, pie):
+        for _ in range(8):
+            pie.separator()
+
+    integration._route_actions_during_draw(
+        draw_eight_empty_slots,
+        None,
+        (routed_pie,),
+        {},
+        (CLOSE,),
+        close_replacements,
+    )
+    assert routed_pie.events[-1][0:2] == ("operator", CLOSE)
+    assert integration._routed_actions == frozenset()
 
     assert integration._context_actions(
         SimpleNamespace(
@@ -131,9 +183,28 @@ try:
         )
     ) == (ADD, REMOVE, CLOSE)
 
+    previous_routed_actions = integration._routed_actions
+    integration._routed_actions = frozenset((CLOSE,))
+    try:
+        stack = []
+        integration._append_group_pro_buttons(
+            stack,
+            SimpleNamespace(
+                mode="OBJECT",
+                active_object=ordinary,
+                selected_objects=[ordinary],
+                scene=editing_scene,
+            ),
+        )
+        assert [button["operator"] for button in stack] == [ADD, REMOVE]
+    finally:
+        integration._routed_actions = previous_routed_actions
+
     integration.unregister()
     assert menu_class.add_contextual_group_button is original
     assert menu_class.draw_empty is original_draw_empty
+    for method_name, original_method in original_close_slot_methods.items():
+        assert getattr(menu_class, method_name) is original_method
     print("M3_GROUP_PRO_BRIDGE_SMOKE_OK")
 finally:
     integration.unregister()

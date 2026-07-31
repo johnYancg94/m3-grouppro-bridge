@@ -25,10 +25,19 @@ from .pie_slots import (
 M3_MENU_ID = "MACHIN3_MT_modes_pie"
 M3_METHOD = "add_contextual_group_button"
 M3_DRAW_EMPTY = "draw_empty"
+M3_CLOSE_SLOT_METHODS = (
+    "draw_mesh",
+    "draw_armature",
+    "draw_misc",
+    "draw_curves",
+    "draw_no_active",
+)
 PATCH_MARKER = "_m3_group_pro_bridge_patch"
 ORIGINAL_MARKER = "_m3_group_pro_bridge_original"
 DRAW_EMPTY_PATCH_MARKER = "_m3_group_pro_bridge_draw_empty_patch"
 DRAW_EMPTY_ORIGINAL_MARKER = "_m3_group_pro_bridge_draw_empty_original"
+CLOSE_SLOT_PATCH_MARKER = "_m3_group_pro_bridge_close_slot_patch"
+CLOSE_SLOT_ORIGINAL_MARKER = "_m3_group_pro_bridge_close_slot_original"
 
 OPERATOR_ICONS = {
     CREATE: "COLLECTION_NEW",
@@ -41,7 +50,8 @@ OPERATOR_ICONS = {
 _patched_class = None
 _original_method = None
 _original_draw_empty = None
-_route_pair_to_slots = False
+_original_close_slot_methods = {}
+_routed_actions = frozenset()
 _retry_count = 0
 _last_error = None
 
@@ -146,9 +156,11 @@ def _properties_for(action, active):
 
 
 def _append_group_pro_buttons(stack, context):
-    actions = _context_actions(context)
-    if _route_pair_to_slots and actions == (EDIT, MAKE_UNIQUE):
-        return
+    actions = tuple(
+        action
+        for action in _context_actions(context)
+        if action not in _routed_actions
+    )
 
     active = getattr(context, "active_object", None)
     for action in actions:
@@ -205,6 +217,22 @@ def _restore_class(menu_class):
             setattr(menu_class, M3_DRAW_EMPTY, original)
             restored = True
 
+    for method_name in M3_CLOSE_SLOT_METHODS:
+        current_method = getattr(menu_class, method_name, None)
+        if current_method and getattr(
+            current_method,
+            CLOSE_SLOT_PATCH_MARKER,
+            False,
+        ):
+            original = getattr(
+                current_method,
+                CLOSE_SLOT_ORIGINAL_MARKER,
+                None,
+            )
+            if original:
+                setattr(menu_class, method_name, original)
+                restored = True
+
     return restored
 
 
@@ -240,8 +268,80 @@ def _empty_slot_replacements(active):
     }
 
 
+def _close_slot_replacements(active):
+    return {
+        PIE_SOUTHEAST: {
+            "operator": CLOSE,
+            "icon": _icon_for(CLOSE, active),
+            "text": _button_text(CLOSE),
+        },
+    }
+
+
+def _route_actions_during_draw(original, self, args, kwargs, actions, replacements):
+    global _routed_actions
+
+    if "pie" in kwargs:
+        pie = kwargs["pie"]
+        routed_kwargs = dict(kwargs)
+        routed_kwargs["pie"] = PieSlotRouter(pie, replacements)
+        routed_args = args
+    elif args:
+        pie = args[-1]
+        routed_args = (*args[:-1], PieSlotRouter(pie, replacements))
+        routed_kwargs = kwargs
+    else:
+        return original(self, *args, **kwargs)
+
+    previous_actions = _routed_actions
+    _routed_actions = previous_actions.union(actions)
+    try:
+        return original(self, *routed_args, **routed_kwargs)
+    finally:
+        _routed_actions = previous_actions
+
+
+def _patch_close_slot_method(menu_class, method_name):
+    current = getattr(menu_class, method_name, None)
+    if current is None:
+        return None
+
+    if getattr(current, CLOSE_SLOT_PATCH_MARKER, False):
+        return getattr(current, CLOSE_SLOT_ORIGINAL_MARKER, None)
+
+    original = current
+
+    @wraps(original)
+    def bridged_close_slot(self, *args, **kwargs):
+        context = bpy.context
+        try:
+            route_close = CLOSE in _context_actions(context)
+        except Exception as error:
+            _report_draw_error(error)
+            route_close = False
+
+        if not route_close:
+            return original(self, *args, **kwargs)
+
+        active = getattr(context, "active_object", None)
+        return _route_actions_during_draw(
+            original,
+            self,
+            args,
+            kwargs,
+            (CLOSE,),
+            _close_slot_replacements(active),
+        )
+
+    setattr(bridged_close_slot, CLOSE_SLOT_PATCH_MARKER, True)
+    setattr(bridged_close_slot, CLOSE_SLOT_ORIGINAL_MARKER, original)
+    setattr(menu_class, method_name, bridged_close_slot)
+    return original
+
+
 def install_patch():
     global _patched_class, _original_method, _original_draw_empty, _last_error
+    global _original_close_slot_methods
 
     menu_class = _resolve_m3_menu_class()
     if menu_class is None:
@@ -294,8 +394,6 @@ def install_patch():
 
         @wraps(original_draw_empty)
         def bridged_draw_empty(self, context, active, linked, pie):
-            global _route_pair_to_slots
-
             try:
                 route_pair = _can_route_pair_to_empty_slots(
                     pies_module,
@@ -307,31 +405,49 @@ def install_patch():
                 _report_draw_error(error)
                 route_pair = False
 
-            if not route_pair:
-                return original_draw_empty(
-                    self,
-                    context,
-                    active,
-                    linked,
-                    pie,
-                )
+            if route_pair:
+                routed_actions = (EDIT, MAKE_UNIQUE)
+                replacements = _empty_slot_replacements(active)
+            else:
+                try:
+                    route_close = (
+                        CLOSE in _context_actions(context)
+                        and can_route_empty_pair(
+                            linked=bool(linked),
+                            is_local_asset=bool(
+                                pies_module.is_local_assembly_asset(active)
+                            ),
+                            is_m3_group=bool(
+                                active
+                                and getattr(active, "M3", None)
+                                and active.M3.is_group_empty
+                            ),
+                        )
+                    )
+                except Exception as error:
+                    _report_draw_error(error)
+                    route_close = False
 
-            previous_route = _route_pair_to_slots
-            _route_pair_to_slots = True
-            try:
-                routed_pie = PieSlotRouter(
-                    pie,
-                    _empty_slot_replacements(active),
-                )
-                return original_draw_empty(
-                    self,
-                    context,
-                    active,
-                    linked,
-                    routed_pie,
-                )
-            finally:
-                _route_pair_to_slots = previous_route
+                if not route_close:
+                    return original_draw_empty(
+                        self,
+                        context,
+                        active,
+                        linked,
+                        pie,
+                    )
+
+                routed_actions = (CLOSE,)
+                replacements = _close_slot_replacements(active)
+
+            return _route_actions_during_draw(
+                original_draw_empty,
+                self,
+                (context, active, linked, pie),
+                {},
+                routed_actions,
+                replacements,
+            )
 
         setattr(bridged_draw_empty, DRAW_EMPTY_PATCH_MARKER, True)
         setattr(
@@ -342,6 +458,17 @@ def install_patch():
         setattr(menu_class, M3_DRAW_EMPTY, bridged_draw_empty)
         _original_draw_empty = original_draw_empty
 
+    _original_close_slot_methods = {
+        method_name: method_original
+        for method_name in M3_CLOSE_SLOT_METHODS
+        if (
+            method_original := _patch_close_slot_method(
+                menu_class,
+                method_name,
+            )
+        )
+    }
+
     _last_error = None
     print("[M3 Group Pro Bridge] MACHIN3tools Modes Pie integration installed.")
     return True
@@ -349,6 +476,7 @@ def install_patch():
 
 def remove_patch():
     global _patched_class, _original_method, _original_draw_empty
+    global _original_close_slot_methods, _routed_actions
 
     restored = False
     if _patched_class is not None:
@@ -361,6 +489,8 @@ def remove_patch():
     _patched_class = None
     _original_method = None
     _original_draw_empty = None
+    _original_close_slot_methods = {}
+    _routed_actions = frozenset()
 
     if restored:
         print("[M3 Group Pro Bridge] MACHIN3tools Modes Pie integration removed.")

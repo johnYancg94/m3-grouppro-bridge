@@ -83,6 +83,35 @@ class PieSlotRouterTests(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(layout.events[-1], ("split",))
 
+    def test_routes_close_group_to_the_southeast_separator(self):
+        layout = RecordingLayout()
+        router = PieSlotRouter(
+            layout,
+            {
+                PIE_SOUTHEAST: {
+                    "operator": "object.close_grouppro",
+                    "icon": "OUTLINER_COLLECTION",
+                    "text": "Close Group  Ⓖ",
+                },
+            },
+        )
+
+        for _ in range(7):
+            router.separator()
+        router.separator()
+
+        self.assertEqual(
+            layout.events[-1],
+            (
+                "operator",
+                "object.close_grouppro",
+                {
+                    "icon": "OUTLINER_COLLECTION",
+                    "text": "Close Group  Ⓖ",
+                },
+            ),
+        )
+
     def test_routes_only_when_both_native_diagonal_slots_are_free(self):
         self.assertTrue(
             can_route_empty_pair(
