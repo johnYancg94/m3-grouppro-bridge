@@ -29,7 +29,7 @@ Other versions may work, but have not yet been verified.
 
 ## Installation
 
-1. Download `m3-grouppro-bridge-v0.4.0.zip` from the
+1. Download `m3-grouppro-bridge-v0.4.1.zip` from the
    [latest release](https://github.com/johnYancg94/m3-grouppro-bridge/releases/latest).
 2. Open Blender preferences and go to **Add-ons**.
 3. Open the add-on menu, choose **Install from Disk**, and select the downloaded
